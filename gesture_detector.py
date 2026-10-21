@@ -27,6 +27,8 @@ from mediapipe.tasks.python.vision import RunningMode
 from mediapipe.tasks.python import BaseOptions
 from mediapipe.tasks.python.vision import drawing_utils, drawing_styles
 
+from ml_gesture_classifier import MLGestureClassifier
+
 # Path to the model file (must sit next to this script, or set env var)
 _MODEL_PATH = os.path.join(os.path.dirname(__file__), "hand_landmarker.task")
 
@@ -35,12 +37,12 @@ _HAND_CONNECTIONS = HandLandmarksConnections.HAND_CONNECTIONS
 
 
 class GestureDetector:
-    """Wraps MediaPipe HandLandmarker (Tasks API v1.0+) with helper utilities."""
+    """Wraps MediaPipe HandLandmarker (Tasks API v1.0+) with ML and heuristic utilities."""
 
     TIP_IDS = [4, 8, 12, 16, 20]   # thumb, index, middle, ring, pinky tips
     PIP_IDS = [3, 6, 10, 14, 18]   # corresponding second joints
 
-    def __init__(self, max_hands=1, detection_con=0.7, tracking_con=0.7):
+    def __init__(self, max_hands=1, detection_con=0.7, tracking_con=0.7, enable_ml=True):
         if not os.path.exists(_MODEL_PATH):
             raise FileNotFoundError(
                 f"[GestureDetector] Model not found: {_MODEL_PATH}\n"
@@ -65,6 +67,14 @@ class GestureDetector:
         self._prev_time = 0
         self.fps        = 0
         self._frame_ts  = 0        # frame timestamp in ms for VIDEO mode
+
+        # ── Machine Learning Gesture Classifier ──────────────────────
+        self.use_ml = enable_ml
+        self.ml_classifier = MLGestureClassifier() if enable_ml else None
+        self.ml_gesture = "Neutral"
+        self.ml_confidence = 0.0
+        self.ml_class_id = 0
+        self.ml_is_confident = False
 
     # ──────────────────────────────────────────────────────────────────
     # Public API
@@ -107,6 +117,20 @@ class GestureDetector:
                 label = result.handedness[0][0].display_name  # "Left" / "Right"
                 # Flip because camera is mirrored
                 self.hand_type = "Right" if label == "Left" else "Left"
+
+            # ── Real-Time ML Gesture Inference ─────────────────────
+            if self.use_ml and self.ml_classifier and self._raw_landmarks:
+                self.ml_gesture, self.ml_confidence, self.ml_class_id, self.ml_is_confident = (
+                    self.ml_classifier.predict(self._raw_landmarks)
+                )
+                if draw:
+                    frame = self.ml_classifier.draw_hud(
+                        frame, self.ml_gesture, self.ml_confidence, self.ml_is_confident
+                    )
+        else:
+            self.ml_gesture = "No Hand"
+            self.ml_confidence = 0.0
+            self.ml_is_confident = False
 
         # FPS
         cur = time.time()
@@ -181,16 +205,16 @@ class GestureDetector:
 
         # Thumb: compare x-coord (depends on hand side) AND tip distance from wrist vs MCP distance
         t_tip_x, t_tip_y = self.lm_list[4][1], self.lm_list[4][2]
-        t_ip_x           = self.lm_list[3][1]
+        t_ip_x, t_ip_y   = self.lm_list[3][1], self.lm_list[3][2]
         t_mcp_x, t_mcp_y = self.lm_list[2][1], self.lm_list[2][2]
 
         t_tip_dist = math.hypot(t_tip_x - wx, t_tip_y - wy)
         t_mcp_dist = math.hypot(t_mcp_x - wx, t_mcp_y - wy)
 
-        if self.hand_type == "Right":
-            thumb_open = (t_tip_x < t_ip_x) and (t_tip_dist > t_mcp_dist * 1.15)
-        else:
-            thumb_open = (t_tip_x > t_ip_x) and (t_tip_dist > t_mcp_dist * 1.15)
+        # Thumb: compare x-coord (side flare) OR y-coord (vertical thumbs up)
+        is_side_open = (t_tip_x < t_ip_x) if self.hand_type == "Right" else (t_tip_x > t_ip_x)
+        is_vert_open = (t_tip_y < t_ip_y) and (t_tip_y < t_mcp_y)
+        thumb_open = (is_side_open or is_vert_open) and (t_tip_dist > t_mcp_dist * 1.10)
         fingers.append(thumb_open)
 
         # Four fingers: tip y < pip y AND tip y < mcp y AND tip dist > mcp dist * 1.30 & pip dist * 1.10
@@ -240,8 +264,14 @@ class GestureDetector:
     def num_hands_detected(self):
         return 1 if self.lm_list else 0
 
-    def get_gesture_name(self, fingers):
-        """Map finger-state list → human-readable gesture name."""
+    def get_gesture_name(self, fingers=None, prefer_ml=True):
+        """Map finger-state list or AI prediction → human-readable gesture name."""
+        if prefer_ml and self.use_ml and self.ml_is_confident and self.ml_gesture not in ("Neutral", "No Hand"):
+            return f"AI: {self.ml_gesture}"
+
+        if fingers is None:
+            fingers = self.fingers_up()
+
         if self.is_claw():
             return "Claw"
         combos = {
@@ -258,6 +288,53 @@ class GestureDetector:
             (1, 1, 0, 0, 0): "Thumb + Index",
         }
         return combos.get(tuple(int(x) for x in fingers), "Custom Gesture")
+
+    def is_ok_gesture(self, max_pinch_ratio=0.38) -> bool:
+        """
+        Detects 'OK' hand gesture:
+          - Thumb tip (4) and Index tip (8) touching together
+          - Middle (12), Ring (16), and Pinky (20) extended UP
+        """
+        if not self.lm_list or len(self.lm_list) < 21:
+            return False
+        fingers = self.fingers_up()  # [T, I, M, R, P]
+        # Middle, Ring, and Pinky must all be extended UP
+        if not (fingers[2] and fingers[3] and fingers[4]):
+            return False
+        palm_size = self.get_palm_size()
+        dist, _, _ = self.distance(4, 8, draw=False)
+        return dist < (palm_size * max_pinch_ratio)
+
+    def is_thumbs_up(self) -> bool:
+        """
+        Detects Thumbs Up gesture:
+          - Thumb tip (4) is pointing UP (above IP 3 and MCP 2)
+          - All other four fingers (index, middle, ring, pinky) are folded down
+        """
+        if not self.lm_list or len(self.lm_list) < 21:
+            return False
+        fingers = self.fingers_up()
+        # Other four fingers must all be down
+        if any(fingers[1:]):
+            return False
+        t_tip_y = self.lm_list[4][2]
+        t_ip_y   = self.lm_list[3][2]
+        t_mcp_y  = self.lm_list[2][2]
+        return (t_tip_y < t_ip_y) and (t_tip_y < t_mcp_y)
+
+    def is_pinch(self, max_pinch_ratio=0.35) -> bool:
+        """
+        Detects Thumb + Index pinch with other fingers folded/relaxed (not the OK gesture).
+        """
+        if not self.lm_list or len(self.lm_list) < 21:
+            return False
+        fingers = self.fingers_up()
+        # If middle, ring, and pinky are all up, that's the OK gesture for mode switch
+        if fingers[2] and fingers[3] and fingers[4]:
+            return False
+        palm_size = self.get_palm_size()
+        dist, _, _ = self.distance(4, 8, draw=False)
+        return dist < (palm_size * max_pinch_ratio)
 
     def is_claw(self) -> bool:
         """

@@ -1,19 +1,23 @@
 """
 powerpoint_control.py
 ─────────────────────
-Microsoft PowerPoint slide navigation via:
-  • win32com automation (if PowerPoint is running), OR
-  • keyboard shortcuts (Right/Left arrow keys) as fallback.
+Presentation controller for Microsoft PowerPoint, Google Slides, and PDFs.
 
-Gesture triggers are decided in main.py.
+Gesture Mappings:
+  • Point (Index Finger)        → Next Slide (Right / Space)
+  • Peace (Two Fingers)         → Previous Slide (Left)
+  • Pinch (Thumb + Index hold)  → Start Slideshow (F5)
+  • Thumbs Up (👍 hold)         → End Slideshow (Escape)
+  • OK Gesture (Hold 0.45s)     → Cycle Mode (Cursor -> Media -> Presentation)
 """
 
 import time
 import pyautogui
 
-# Try win32com for direct PPT control
 try:
     import win32com.client
+    import win32gui
+    import win32con
     _WIN32_AVAILABLE = True
 except ImportError:
     _WIN32_AVAILABLE = False
@@ -21,11 +25,12 @@ except ImportError:
 
 class PowerPointController:
     """
-    Navigate PowerPoint slides: next, previous.
-    Tries COM automation first, falls back to keyboard arrows.
+    Robust presentation controller supporting:
+    - Microsoft PowerPoint (COM Automation + Window Activation)
+    - Browser / PDF presentations (Google Slides, Canva) via focused keys
     """
 
-    COOLDOWN = 0.8   # seconds between slide changes
+    COOLDOWN = 0.5   # Responsive navigation cooldown
 
     def __init__(self):
         self._ppt      = None
@@ -38,31 +43,46 @@ class PowerPointController:
         if not self._cooldown_ok():
             return
         self._touch()
+        
+        # 1. Try COM first
         if self._ppt_active():
             try:
-                sw = self._ppt.ActivePresentation.SlideShowWindow
-                sw.View.Next()
-                return
+                if self._ppt.SlideShowWindows.Count > 0:
+                    self._ppt.SlideShowWindows(1).View.Next()
+                    return
+                elif self._ppt.ActiveWindow:
+                    self._ppt.ActiveWindow.View.Next()
+                    return
             except Exception:
                 pass
-        # Fallback
+
+        # 2. Focus window & press Right arrow
+        self._focus_presentation_window()
         pyautogui.press('right')
 
     def previous_slide(self):
         if not self._cooldown_ok():
             return
         self._touch()
+
+        # 1. Try COM first
         if self._ppt_active():
             try:
-                sw = self._ppt.ActivePresentation.SlideShowWindow
-                sw.View.Previous()
-                return
+                if self._ppt.SlideShowWindows.Count > 0:
+                    self._ppt.SlideShowWindows(1).View.Previous()
+                    return
+                elif self._ppt.ActiveWindow:
+                    self._ppt.ActiveWindow.View.Previous()
+                    return
             except Exception:
                 pass
+
+        # 2. Focus window & press Left arrow
+        self._focus_presentation_window()
         pyautogui.press('left')
 
     def start_slideshow(self):
-        """Start the slideshow from beginning (F5)."""
+        """Start the slideshow (F5)."""
         if not self._cooldown_ok():
             return
         self._touch()
@@ -72,6 +92,7 @@ class PowerPointController:
                 return
             except Exception:
                 pass
+        self._focus_presentation_window()
         pyautogui.press('f5')
 
     def end_slideshow(self):
@@ -79,19 +100,55 @@ class PowerPointController:
         if not self._cooldown_ok():
             return
         self._touch()
+        if self._ppt_active():
+            try:
+                if self._ppt.SlideShowWindows.Count > 0:
+                    self._ppt.SlideShowWindows(1).View.Exit()
+                    return
+            except Exception:
+                pass
+        self._focus_presentation_window()
         pyautogui.press('escape')
 
     def current_slide_info(self) -> str:
         """Return 'Slide X / Y' or empty string."""
         if self._ppt_active():
             try:
-                sw  = self._ppt.ActivePresentation.SlideShowWindow
-                cur = sw.View.CurrentShowPosition
-                tot = self._ppt.ActivePresentation.Slides.Count
-                return f"Slide {cur} / {tot}"
+                if self._ppt.SlideShowWindows.Count > 0:
+                    sw  = self._ppt.SlideShowWindows(1)
+                    cur = sw.View.CurrentShowPosition
+                    tot = self._ppt.ActivePresentation.Slides.Count
+                    return f"Slide {cur} / {tot}"
+                elif self._ppt.ActiveWindow:
+                    cur = self._ppt.ActiveWindow.View.Slide.SlideIndex
+                    tot = self._ppt.ActivePresentation.Slides.Count
+                    return f"Slide {cur} / {tot}"
             except Exception:
                 pass
         return ""
+
+    def _focus_presentation_window(self):
+        """Finds and foregrounds PowerPoint or fullscreen slideshow window."""
+        if not _WIN32_AVAILABLE:
+            return
+        def enum_cb(hwnd, matches):
+            if win32gui.IsWindowVisible(hwnd):
+                title = win32gui.GetWindowText(hwnd).lower()
+                # Match PowerPoint slideshow or presentation
+                if "powerpoint slide show" in title or "diaporama powerpoint" in title:
+                    matches.insert(0, hwnd)  # High priority: running slideshow
+                elif "powerpoint" in title or ".pptx" in title:
+                    matches.append(hwnd)
+        matches = []
+        try:
+            win32gui.EnumWindows(enum_cb, matches)
+            if matches:
+                target_hwnd = matches[0]
+                win32gui.ShowWindow(target_hwnd, win32con.SW_RESTORE)
+                win32gui.SetForegroundWindow(target_hwnd)
+                time.sleep(0.04)
+        except Exception:
+            pass
 
     def reconnect(self):
         """Re-try COM connection (call if PPT was opened after app start)."""

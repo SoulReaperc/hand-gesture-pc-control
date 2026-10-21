@@ -1,0 +1,20 @@
+{
+  "model_name": "Deep MLP Neural Network Gesture Classifier",
+  "champion_architecture": "MLP (128x64 ReLU, Softmax Output)",
+  "classes": [
+    "NONE",
+    "INDEX_POINT",
+    "V_SIGN",
+    "OPEN_PALM",
+    "FIST",
+    "OK_GESTURE",
+    "ROCK_HORNS",
+    "THUMBS_UP",
+    "PINCH"
+  ],
+  "n_classes": 9,
+  "n_features": 78,
+  "test_accuracy": 0.9646017699115044,
+  "test_f1": 0.9643167600074102,
+  "trained_on_custom": true
+}

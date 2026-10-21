@@ -4,35 +4,33 @@ main.py  ─  Gesture Control System
 Python 3.12 | MediaPipe Tasks 1.0 | OpenCV | pycaw | pyautogui | win32com
 
 Run:  python main.py
-Keys: Q/Esc=quit  M=next mode  H=help  S=screenshot  R=PPT reconnect
+Keys: Q/Esc=quit  M=next mode  T=toggle AI ML  H=help  S=screenshot  R=PPT reconnect
 
 ════════════════════════════════════════════════════════════════════════
-GESTURE REFERENCE
+GESTURE & MODE REFERENCE
 ─────────────────────────────────────────────────────────────────────
-▶ AUTO MODE  (default — mouse + volume work together, no switching)
+▶ OK GESTURE (Works Anywhere):
+    Thumb + Index tips pinch with 3 fingers UP → Hold 0.4s to cycle mode:
+    CURSOR → MEDIA → PRESENTATION → CURSOR
 
-  VOLUME:
-    All 5 fingers SPREAD WIDE apart (fan shape) to activate.
-    Rotate hand  CLOCKWISE          →  Volume UP
-    Rotate hand  ANTI-CLOCKWISE     →  Volume DOWN
-    Spread-open → close to FIST → hold 1 s  →  Mute toggle
+▶ CURSOR MODE
+    Index finger pointing (only)  → Move cursor (Dead Zone & Anti-Jitter)
+    Index + Middle tips PINCH     → Left Click (Cursor locks in place!)
+    Thumb + Index tips PINCH      → Right Click (Cursor locks in place!)
+    3 fingers up + move hand dy   → Smooth Scroll UP / DOWN
 
-  MOUSE:
-    Index finger up (ring + pinky down)  →  Move cursor
-    Index + Middle tips PINCH close      →  Left click
-    Thumb + Index  tips PINCH close      →  Right click
-    3 fingers up + move hand up / down  →  Scroll
+▶ MEDIA MODE
+    All 5 fingers spread & rotate → System Volume (CW = UP, CCW = DOWN)
+    Spread-open → close to FIST   → Hold 1s = Mute toggle
+    Index swipe RIGHT             → Next Track / Next Video
+    Index swipe LEFT              → Prev Track / Prev Video
+    Peace (2 fingers) or Horns    → Play / Pause
 
-▶ SPOTIFY MODE  (press M)
-    Index swipe RIGHT   →  Next track
-    Index swipe LEFT    →  Previous track
-    Index + Pinky UP (ONLY) →  Play / Pause
-
-▶ POWERPOINT MODE  (press M again)
-    Index+Middle swipe RIGHT  →  Next slide
-    Index+Middle swipe LEFT   →  Previous slide
-    Open hand hold 0.5 s      →  Start slideshow
-    Fist hold 1 s             →  End slideshow
+▶ PRESENTATION MODE
+    Index pointing / swipe RIGHT  → Next Slide (PowerPoint / Slides)
+    Index swipe LEFT              → Previous Slide
+    Open Hand (5 fingers)         → Hold 0.5s = Start Slideshow (F5)
+    Fist                          → Hold 0.8s = End Slideshow (Esc)
 ════════════════════════════════════════════════════════════════════════
 """
 
@@ -58,11 +56,11 @@ CAM_W     = 1280
 CAM_H     = 720
 WIN_NAME  = "Gesture Control System"
 
-MODES = ["AUTO", "SPOTIFY", "POWERPOINT"]
+MODES = ["CURSOR", "MEDIA", "PRESENTATION"]
 MODE_COLORS = {
-    "AUTO":       (255, 200,  50),
-    "SPOTIFY":    ( 80, 255,  80),
-    "POWERPOINT": (255, 120,  50),
+    "CURSOR":       (255, 200,  50),  # Electric Cyan / Yellow
+    "MEDIA":        ( 80, 255, 100),  # Media Green
+    "PRESENTATION": ( 50, 140, 255),  # Slide Orange
 }
 
 # Volume
@@ -71,21 +69,26 @@ ROT_STEP_DEG   = 18    # degrees per volume step
 VOL_STEP_PCT   = 2     # % per step
 ROT_DEAD_DEG   = 5     # ignore jitter below this
 
-# Mouse Sensitivity Configuration (Higher margin = less physical hand movement needed)
-MOUSE_MARGIN_X = 0.33    # 33% margin left/right (active region is central 34%)
-MOUSE_MARGIN_Y = 0.32    # 32% margin top/bottom (active region is central 36%)
-MOUSE_SMOOTH   = 2.5     # Low lag, highly responsive cursor tracking
-CLICK_DIST     = 38
-CLICK_COOL     = 0.45
-SCROLL_COOL    = 0.12
+# Mouse / Cursor Sensitivity & Dead Zone Configuration
+DEAD_ZONE_PX   = 6.0   # Screen pixel dead zone (eliminates hand tremor micro-jitter)
+MOUSE_MARGIN_X = 0.30  # Active central tracking region (horizontal)
+MOUSE_MARGIN_Y = 0.28  # Active central tracking region (vertical)
+MOUSE_SMOOTH_SLOW = 5.0  # High smoothing factor when moving slowly / hovering
+MOUSE_SMOOTH_FAST = 2.0  # Responsive low smoothing when moving fast
+CLICK_COOL     = 0.40  # Seconds between click triggers
+SCROLL_COOL    = 0.10  # Seconds between scroll actions
+
+# Mode Switch
+OK_HOLD_SEC    = 0.45  # Seconds to hold OK gesture to cycle mode
+OK_COOLDOWN    = 1.20  # Cooldown seconds between mode switches
 
 # Swipe
-SWIPE_WIN      = 15
-SWIPE_PX       = 85
+SWIPE_WIN      = 12
+SWIPE_PX       = 75
 
 # Holds
-FIST_HOLD      = 1.0
-OPEN_HOLD      = 0.5
+FIST_HOLD      = 0.85
+OPEN_HOLD      = 0.50
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -128,12 +131,22 @@ class GestureApp:
         self._last_scroll   = 0.0
         self._scroll_ref_y  = None
         self._scroll_prev_y = None
+        self._freeze_cursor_until = 0.0  # Lock cursor during click/pinch to prevent drifting
+
+        # ── Mode Switch & OK Gesture state ────────────────────────
+        self._ok_start_t          = None
+        self._last_mode_switch_t  = 0.0
 
         # ── Swipe / Spotify / PPT state ───────────────────────────
         self._swipe_x          : list[int] = []
         self._last_spotify_pp  = 0.0
         self._open_t           = None
         self._ppt_fist_t       = None
+        self._ppt_last_nav_t   = 0.0
+        self._ppt_pinch_start  = None
+        self._ppt_thumb_start  = None
+        self._ppt_point_start  = None
+        self._ppt_peace_start  = None
 
     # ──────────────────────────────────────────────────────────────────
     def _open_cam(self):
@@ -162,9 +175,30 @@ class GestureApp:
                 if palm_facing:
                     fingers = self.detector.fingers_up()
                     gesture = self.detector.get_gesture_name(fingers)
-                    if   self.mode == "AUTO":       self._auto_mode(frame, fingers, lm)
-                    elif self.mode == "SPOTIFY":    self._spotify_mode(frame, fingers, lm)
-                    elif self.mode == "POWERPOINT": self._ppt_mode(frame, fingers, lm)
+                    # ── OK Hand Gesture Mode Switch (Global) ──────────
+                    now = time.time()
+                    if self.detector.is_ok_gesture():
+                        if self._ok_start_t is None:
+                            self._ok_start_t = now
+                        elapsed_ok = now - self._ok_start_t
+                        next_idx = (self.mode_idx + 1) % len(MODES)
+                        self._draw_hold_bar(frame, elapsed_ok, OK_HOLD_SEC, f"OK Gesture: Switch to {MODES[next_idx]}")
+                        if elapsed_ok >= OK_HOLD_SEC and (now - self._last_mode_switch_t > OK_COOLDOWN):
+                            self.mode_idx = next_idx
+                            self.mode = MODES[self.mode_idx]
+                            self._last_mode_switch_t = now
+                            self._ok_start_t = None
+                            self._reset_vol()
+                            self._swipe_x.clear()
+                            self._flash(f"MODE → {self.mode}")
+                    else:
+                        self._ok_start_t = None
+
+                    # Execute actions for active mode when not cycling
+                    if self._ok_start_t is None:
+                        if   self.mode == "CURSOR":       self._cursor_mode(frame, fingers, lm)
+                        elif self.mode == "MEDIA":        self._media_mode(frame, fingers, lm)
+                        elif self.mode == "PRESENTATION": self._presentation_mode(frame, fingers, lm)
                 else:
                     fingers = [False] * 5
                     gesture = "Back of Hand (Show Palm)"
@@ -192,6 +226,10 @@ class GestureApp:
                 self._flash(f"MODE → {self.mode}")
             elif key == ord('h'):
                 self.show_help = not self.show_help
+            elif key == ord('t'):
+                self.detector.use_ml = not self.detector.use_ml
+                st = "AI MODEL: ENABLED" if self.detector.use_ml else "AI MODEL: DISABLED (Heuristics)"
+                self._flash(st)
             elif key == ord('s'):
                 fn = f"shot_{int(time.time())}.png"
                 cv2.imwrite(fn, frame)
@@ -204,62 +242,66 @@ class GestureApp:
         cv2.destroyAllWindows()
 
     # ══════════════════════════════════════════════════════════════════
-    # AUTO MODE  — volume + mouse simultaneously
+    # CURSOR MODE  — jitter-free mouse, click freeze & smooth scrolling
     # ══════════════════════════════════════════════════════════════════
-    def _auto_mode(self, frame, fingers, lm):
+    def _cursor_mode(self, frame, fingers, lm):
         T, I, M, R, P = fingers
-        fist      = not any(fingers)
         three_up  = (not T) and I and M and R and (not P)   # [0,1,1,1,0]
-        is_spread = self._is_spread_open(fingers, lm)
         now       = time.time()
 
-        # Dynamic hand-scale distance threshold for clicks (35% of palm size)
         palm_size       = self.detector.get_palm_size()
-        click_threshold = max(18.0, palm_size * 0.35)
+        click_threshold = max(20.0, palm_size * 0.35)
 
-        # ─── VOLUME & MUTE: volume dial or spread->fist mute sequence ──────────
-        self._do_volume(frame, fingers, lm, fist, is_spread)
-
-        # Skip mouse/scroll while hand is spread, holding mute, in mute cooldown, or recently spread
-        if is_spread or self._mute_holding or (now < self._mute_cooldown) or (now - self._last_spread_t < 1.0):
-            return
-
-        # ─── MOUSE: index up + ring&pinky down ───────────────────
-        if I and not R and not P and not three_up:
-            self._do_mouse_move(frame, lm)
-
-        # Left click: index + middle tips pinch (dynamic hand scale)
+        # ── Left Click: Index + Middle tips pinch ─────────────────────
+        left_pinching = False
         if I and M and not R and not P:
             d, frame, info = self.detector.distance(8, 12, frame, draw=True)
             self._draw_pinch_dot(frame, info, d, click_threshold, green=True)
-            if d < click_threshold and time.time() - self._last_lclick > CLICK_COOL:
-                pyautogui.click()
-                self._last_lclick = time.time()
-                self._flash("Left Click ✓")
+            if d < click_threshold:
+                left_pinching = True
+                self._freeze_cursor_until = now + 0.35  # Freeze cursor firmly
+                if now - self._last_lclick > CLICK_COOL:
+                    pyautogui.click()
+                    self._last_lclick = now
+                    self._flash("Left Click ✓")
+            elif d < click_threshold * 1.30:
+                # Approaching click: freeze cursor immediately to prevent drift
+                self._freeze_cursor_until = now + 0.15
+                left_pinching = True
 
-        # Right click: thumb + index tips pinch (dynamic hand scale)
+        # ── Right Click: Thumb + Index tips pinch ─────────────────────
+        right_pinching = False
         if T and I and not M and not R and not P:
             d, frame, info = self.detector.distance(4, 8, frame, draw=True)
             self._draw_pinch_dot(frame, info, d, click_threshold, green=False)
-            if d < click_threshold and time.time() - self._last_rclick > CLICK_COOL:
-                pyautogui.rightClick()
-                self._last_rclick = time.time()
-                self._flash("Right Click ✓")
+            if d < click_threshold:
+                right_pinching = True
+                self._freeze_cursor_until = now + 0.35  # Freeze cursor firmly
+                if now - self._last_rclick > CLICK_COOL:
+                    pyautogui.rightClick()
+                    self._last_rclick = now
+                    self._flash("Right Click ✓")
+            elif d < click_threshold * 1.30:
+                self._freeze_cursor_until = now + 0.15
+                right_pinching = True
 
-        # ─── SCROLL (3 fingers up + move hand up/down) ───────────
+        # ── Scroll: 3 fingers up + hand moving up/down ────────────────
         if three_up:
-            self._do_scroll(frame, lm, three_up=three_up)
+            self._freeze_cursor_until = now + 0.20
+            self._do_scroll(frame, lm, three_up=True)
         else:
             self._scroll_prev_y = None
+
+        # ── Move Cursor (Index pointing, only when NOT pinching/clicking) ──
+        if I and not R and not P and not three_up and not left_pinching and not right_pinching:
+            if now >= self._freeze_cursor_until:
+                self._do_mouse_move(frame, lm)
 
         # Guide
         h, w = frame.shape[:2]
         cv2.putText(frame,
-                    "Index=Move | I+M=LClick | T+I=RClick | 3-Fingers UP=Scroll",
+                    "Index=Move | I+M Pinch=LClick | T+I Pinch=RClick | 3-Fingers=Scroll | Hold OK=Mode",
                     (10, h - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 200, 50), 1)
-        cv2.putText(frame,
-                    "Spread 5 fingers wide=Volume | Spread→Fist 1s=Mute",
-                    (10, h - 70), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 200, 255), 1)
 
     # ──────────────────────────────────────────────────────────────────
     def _is_spread_open(self, fingers, lm) -> bool:
@@ -385,18 +427,40 @@ class GestureApp:
     # ──────────────────────────────────────────────────────────────────
     def _do_mouse_move(self, frame, lm):
         sw, sh = pyautogui.size()
-        ix, iy = lm[8][1], lm[8][2]
+        # Blend Index Tip (lm 8) with Index PIP (lm 6) for jitter-resistant tracking
+        ix = (lm[8][1] * 0.70 + lm[6][1] * 0.30)
+        iy = (lm[8][2] * 0.70 + lm[6][2] * 0.30)
+
         mx = MOUSE_MARGIN_X
         my = MOUSE_MARGIN_Y
         tx = np.interp(ix, [int(CAM_W * mx), int(CAM_W * (1 - mx))], [0, sw - 1])
         ty = np.interp(iy, [int(CAM_H * my), int(CAM_H * (1 - my))], [0, sh - 1])
         tx = float(np.clip(tx, 0, sw - 1))
         ty = float(np.clip(ty, 0, sh - 1))
-        self._mx += (tx - self._mx) / MOUSE_SMOOTH
-        self._my += (ty - self._my) / MOUSE_SMOOTH
+
+        # Dead Zone Calculation (ignore micro-tremors below DEAD_ZONE_PX)
+        dx = tx - self._mx
+        dy = ty - self._my
+        delta_dist = math.hypot(dx, dy)
+
+        if delta_dist < DEAD_ZONE_PX:
+            cv2.circle(frame, (int(lm[8][1]), int(lm[8][2])), 8, (100, 255, 100), 1)
+            return
+
+        # Adaptive Velocity Smoothing (One-Euro style)
+        if delta_dist < 18.0:
+            smooth = MOUSE_SMOOTH_SLOW
+        elif delta_dist > 60.0:
+            smooth = MOUSE_SMOOTH_FAST
+        else:
+            t = (delta_dist - 18.0) / 42.0
+            smooth = MOUSE_SMOOTH_SLOW * (1.0 - t) + MOUSE_SMOOTH_FAST * t
+
+        self._mx += dx / smooth
+        self._my += dy / smooth
         pyautogui.moveTo(int(round(self._mx)), int(round(self._my)))
-        cv2.circle(frame, (ix, iy), 14, (50, 255, 130), cv2.FILLED)
-        cv2.circle(frame, (ix, iy), 14, (0, 0, 0), 1)
+        cv2.circle(frame, (int(lm[8][1]), int(lm[8][2])), 14, (50, 255, 130), cv2.FILLED)
+        cv2.circle(frame, (int(lm[8][1]), int(lm[8][2])), 14, (0, 0, 0), 1)
 
     def _do_scroll(self, frame, lm, three_up: bool):
         """
@@ -449,27 +513,35 @@ class GestureApp:
         cv2.circle(frame, (info[4], info[5]), 10, col, cv2.FILLED)
 
     # ══════════════════════════════════════════════════════════════════
-    # SPOTIFY MODE
+    # MEDIA MODE  — Volume, Spotify & YouTube playback control
     # ══════════════════════════════════════════════════════════════════
-    def _spotify_mode(self, frame, fingers, lm):
+    def _media_mode(self, frame, fingers, lm):
         T, I, M, R, P = fingers
-        ix = lm[8][1]
+        fist      = not any(fingers)
+        is_spread = self._is_spread_open(fingers, lm)
+        now       = time.time()
+        ix        = lm[8][1]
         palm_size = self.detector.get_palm_size()
-        swipe_threshold = max(40.0, palm_size * 0.60)
+        swipe_threshold = max(35.0, palm_size * 0.50)
 
-        # Play / Pause: ONLY Index + Pinky UP ([0, 1, 0, 0, 1])
-        index_pinky_only = I and P and (not T) and (not M) and (not R)
-        if index_pinky_only:
-            now = time.time()
-            if now - self._last_spotify_pp > 0.8:
+        # ── 1. Rotary Volume Dial & Spread->Fist Mute Sequence ───────
+        self._do_volume(frame, fingers, lm, fist, is_spread)
+        if is_spread or self._mute_holding or (now < self._mute_cooldown) or (now - self._last_spread_t < 0.8):
+            return
+
+        # ── 2. Play / Pause: Peace (2 fingers) OR Horns (Index+Pinky) ──
+        peace_or_horns = (I and M and not R and not P) or (I and P and not T and not M and not R)
+        if peace_or_horns:
+            if now - self._last_spotify_pp > 0.70:
                 self.spotify.play_pause()
+                pyautogui.press('playpause')
                 self._flash("⏯  Play / Pause")
                 self._last_spotify_pp = now
             self._swipe_x.clear()
             return
 
-        # Swipe NEXT / PREV track (Index UP without Pinky)
-        if I and not P:
+        # ── 3. Next / Prev Track (Swipe Index) ───────────────────────
+        if I and not M and not R and not P:
             self._swipe_x.append(ix)
             if len(self._swipe_x) > SWIPE_WIN:
                 self._swipe_x.pop(0)
@@ -477,84 +549,98 @@ class GestureApp:
                 dx = self._swipe_x[-1] - self._swipe_x[0]
                 if dx > swipe_threshold:
                     self.spotify.next_track()
-                    self._flash("⏭  Next Track")
+                    pyautogui.hotkey('shift', 'n')
+                    pyautogui.press('nexttrack')
+                    self._flash("⏭  Next Track / Video")
                     self._swipe_x.clear()
                 elif dx < -swipe_threshold:
                     self.spotify.previous_track()
-                    self._flash("⏮  Previous Track")
+                    pyautogui.hotkey('shift', 'p')
+                    pyautogui.press('prevtrack')
+                    self._flash("⏮  Previous Track / Video")
                     self._swipe_x.clear()
         else:
             self._swipe_x.clear()
 
         h, w = frame.shape[:2]
         cv2.putText(frame,
-                    "Swipe RIGHT=Next | Swipe LEFT=Prev | Index+Pinky UP=Play/Pause",
-                    (10, h - 50), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.48, (80, 255, 80), 1)
+                    "Spread Hand=Vol Dial | Peace/Horns=Play/Pause | Swipe=Next/Prev | Hold OK=Mode",
+                    (10, h - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (80, 255, 100), 1)
 
     # ══════════════════════════════════════════════════════════════════
-    # POWERPOINT MODE
+    # PRESENTATION MODE — PowerPoint, Google Slides & PDF presenter
     # ══════════════════════════════════════════════════════════════════
-    def _ppt_mode(self, frame, fingers, lm):
+    def _presentation_mode(self, frame, fingers, lm):
         T, I, M, R, P = fingers
-        ix   = lm[8][1]
-        all5 = all(fingers)
-        fist = not any(fingers)
-        palm_size = self.detector.get_palm_size()
-        swipe_threshold = max(40.0, palm_size * 0.60)
+        now = time.time()
 
-        if I and M:
-            self._swipe_x.append(ix)
-            if len(self._swipe_x) > SWIPE_WIN:
-                self._swipe_x.pop(0)
-            if len(self._swipe_x) == SWIPE_WIN:
-                dx = self._swipe_x[-1] - self._swipe_x[0]
-                if dx > swipe_threshold:
-                    self.ppt.next_slide()
-                    self._flash("▶ Next Slide")
-                    self._swipe_x.clear()
-                elif dx < -swipe_threshold:
-                    self.ppt.previous_slide()
-                    self._flash("◀ Previous Slide")
-                    self._swipe_x.clear()
-        else:
-            self._swipe_x.clear()
+        is_pinch = self.detector.is_pinch(max_pinch_ratio=0.38)
+        is_thumbs_up = self.detector.is_thumbs_up()
+        is_point = I and (not M) and (not R) and (not P) and (not is_pinch)
+        is_peace = I and M and (not R) and (not P) and (not is_pinch)
 
-        if all5:
-            if self._open_t is None:
-                self._open_t = time.time()
-            else:
-                e = time.time() - self._open_t
-                self._draw_hold_bar(frame, e, OPEN_HOLD, "Hold → Start Slideshow")
-                if e >= OPEN_HOLD:
-                    self.ppt.start_slideshow()
-                    self._flash("PPT: Started ▶")
-                    self._open_t = None
+        # ── 1. Start Slideshow: Pinch (Thumb + Index) hold 0.35s ─────
+        if is_pinch:
+            if self._ppt_pinch_start is None:
+                self._ppt_pinch_start = now
+            e = now - self._ppt_pinch_start
+            self._draw_hold_bar(frame, e, 0.35, "Hold Pinch → Start Slideshow (F5)")
+            if e >= 0.35:
+                self.ppt.start_slideshow()
+                self._flash("PPT: Slideshow Started ▶ (F5)")
+                self._ppt_pinch_start = None
+                self._ppt_last_nav_t = now + 0.3
+            return
         else:
-            self._open_t = None
+            self._ppt_pinch_start = None
 
-        if fist:
-            if self._ppt_fist_t is None:
-                self._ppt_fist_t = time.time()
-            else:
-                e = time.time() - self._ppt_fist_t
-                self._draw_hold_bar(frame, e, FIST_HOLD, "Hold → End Slideshow")
-                if e >= FIST_HOLD:
-                    self.ppt.end_slideshow()
-                    self._flash("PPT: Ended ■")
-                    self._ppt_fist_t = None
+        # ── 2. End Slideshow: Thumbs Up hold 0.45s ───────────────────
+        if is_thumbs_up:
+            if self._ppt_thumb_start is None:
+                self._ppt_thumb_start = now
+            e = now - self._ppt_thumb_start
+            self._draw_hold_bar(frame, e, 0.45, "Hold Thumbs Up → End Slideshow (Esc)")
+            if e >= 0.45:
+                self.ppt.end_slideshow()
+                self._flash("PPT: Slideshow Ended ■ (Esc)")
+                self._ppt_thumb_start = None
+                self._ppt_last_nav_t = now + 0.3
+            return
         else:
-            self._ppt_fist_t = None
+            self._ppt_thumb_start = None
+
+        # ── 3. Next Slide: Point gesture (Index finger up) ────────────
+        if is_point:
+            if self._ppt_point_start is None:
+                self._ppt_point_start = now
+            e = now - self._ppt_point_start
+            if e >= 0.18 and (now - self._ppt_last_nav_t > 0.65):
+                self.ppt.next_slide()
+                self._flash("▶ Next Slide (Point)")
+                self._ppt_last_nav_t = now
+        else:
+            self._ppt_point_start = None
+
+        # ── 4. Previous Slide: Peace gesture (Two fingers up) ─────────
+        if is_peace:
+            if self._ppt_peace_start is None:
+                self._ppt_peace_start = now
+            e = now - self._ppt_peace_start
+            if e >= 0.18 and (now - self._ppt_last_nav_t > 0.65):
+                self.ppt.previous_slide()
+                self._flash("◀ Previous Slide (Peace)")
+                self._ppt_last_nav_t = now
+        else:
+            self._ppt_peace_start = None
 
         info = self.ppt.current_slide_info()
         h, w = frame.shape[:2]
         if info:
             cv2.putText(frame, info, (10, h - 75),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 120, 50), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (50, 140, 255), 2)
         cv2.putText(frame,
-                    "2-Finger Swipe=Slide | OpenHand=Start | Fist=End",
-                    (10, h - 50), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.48, (255, 120, 50), 1)
+                    "Point=Next Slide | Peace=Prev Slide | Pinch=Start (F5) | Thumbs Up=End (Esc) | Hold OK=Mode",
+                    (10, h - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (50, 140, 255), 1)
 
     # ══════════════════════════════════════════════════════════════════
     # HUD
@@ -617,32 +703,35 @@ class GestureApp:
             self._draw_help(frame, color)
 
         cv2.putText(frame,
-                    "[Q]Quit [M]Mode [H]Help [S]Screenshot [R]PPT",
+                    "[Q]Quit [M]Mode [T]AI Toggle [H]Help [S]Screenshot [R]PPT",
                     (10, h-8), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (90,90,90), 1)
         return frame
 
     def _draw_help(self, frame, color):
         h, w = frame.shape[:2]
         tips = {
-            "AUTO": [
-                "VOLUME: Spread 5 fingers WIDE",
-                "  Rotate CW=UP  CCW=DOWN",
-                "  Spread->Fist hold 1s = Mute",
-                "MOUSE: Index up = Move cursor",
-                "  I+M pinch = Left click",
-                "  T+I pinch = Right click",
-                "  3 fingers up+down = Scroll",
+            "CURSOR": [
+                "OK Gesture (Thumb+Index) = Cycle Mode",
+                "Index up = Move cursor (dead-zone smoothed)",
+                "I+M pinch = Left click (pos locked)",
+                "T+I pinch = Right click",
+                "3 fingers (I+M+R) up/down = Scroll",
+                "T+I drag hold = Drag & Drop",
             ],
-            "SPOTIFY": [
-                "Index swipe RIGHT = Next",
-                "Index swipe LEFT  = Prev",
-                "Index + Pinky UP  = Play/Pause",
+            "MEDIA": [
+                "OK Gesture (Thumb+Index) = Cycle Mode",
+                "Index swipe RIGHT = Next track",
+                "Index swipe LEFT  = Prev track",
+                "Index + Pinky UP  = Play / Pause",
+                "Spread 5 fingers & Rotate = Vol Up/Down",
+                "Fist hold 1s      = Mute toggle",
             ],
-            "POWERPOINT": [
-                "2-finger swipe RIGHT = Next slide",
-                "2-finger swipe LEFT  = Prev slide",
-                "Open hand 0.5s = Start slideshow",
-                "Fist hold 1s   = End slideshow",
+            "PRESENTATION": [
+                "OK Gesture (Hold) = Cycle Mode",
+                "Point (Index Up)  = Next slide (→)",
+                "Peace (Two Up)    = Previous slide (←)",
+                "Pinch (T+I hold)  = Start slideshow (F5)",
+                "Thumbs Up hold    = End slideshow (Esc)",
             ],
         }
         lines = tips.get(self.mode, [])

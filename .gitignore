@@ -1,2 +1,64 @@
-/venv
-/__pycache__
+# Environments & Virtual Envs
+venv/
+.venv/
+env/
+ENV/
+
+# Python Cache & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Sensitive Environment Configurations
+.env
+.env.local
+!.env.example
+
+# IDE & Editor Specific
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+
+# Operating System Files
+Thumbs.db
+ehthumbs.db
+desktop.ini
+.DS_Store
+
+# Temporary Test & Office Artifacts
+test_anim_output.pptx
+test_win32_anim.pptx
+~$*.pptx
+*.tmp
+*.log
+
+# Antigravity / IDE internal runtime state
+.gemini/
+scripts/search_repo.ps1
+scripts/search_repo.sh
+scripts/setup_search.ps1
+scripts/setup_search.sh
+scripts/validate-agents.ps1
+scripts/validate-agents.sh
+scripts/validate-all.ps1
+scripts/validate-all.sh
+scripts/validate-encoding.ps1
+scripts/validate-encoding.sh
+scripts/validate-skills.ps1
+scripts/validate-skills.sh
+scripts/validate-templates.ps1
+scripts/validate-templates.sh
+scripts/validate-workflows.ps1
+scripts/validate-workflows.sh
+model_capabilities.yaml
+presentation/app.js
+presentation/index.html
+presentation/style.css
